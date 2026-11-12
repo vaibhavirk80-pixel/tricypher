@@ -1,0 +1,65 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TriCypher Privacy Shield</title>
+    <link rel="stylesheet" href="popup.css">
+</head>
+
+<body>
+    <div class="container">
+
+        <header class="header">
+            <div class="logo">
+                <span class="shield">🛡️</span>
+                <div>
+                    <h1>TriCypher</h1>
+                    <p>AI Privacy Shield</p>
+                </div>
+            </div>
+            <span class="status" id="status">● Protected</span>
+        </header>
+
+        <div class="intro">
+            <h2>Protect your prompts.</h2>
+            <p>Remove sensitive information before sending text to AI models.</p>
+        </div>
+
+        <label for="inputText">YOUR ORIGINAL PROMPT</label>
+
+        <textarea
+            id="inputText"
+            placeholder="Example: My name is Rahul and my email is rahul@gmail.com..."
+        ></textarea>
+
+        <button id="protectBtn">
+            🛡️ Protect My Data
+        </button>
+
+        <div id="resultSection" class="result-section hidden">
+            <div class="result-header">
+                <label>PROTECTED OUTPUT</label>
+                <span id="detectionCount">0 detected</span>
+            </div>
+
+            <div id="protectedOutput" class="output"></div>
+
+            <button id="copyBtn" class="secondary-btn">
+                Copy Protected Text
+            </button>
+        </div>
+
+        <p id="message" class="message"></p>
+
+        <footer>
+            <span>🔐 Powered by TriCypher Engine</span>
+            <span>Local API</span>
+        </footer>
+
+    </div>
+
+    <script src="popup.js"></script>
+</body>
+</html>

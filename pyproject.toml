@@ -1,0 +1,10 @@
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tricypher"
+version = "0.1.0"
+description = "Open-source AI privacy protection layer"
+requires-python = ">=3.10"
