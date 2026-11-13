@@ -2,13 +2,45 @@
 import csv
 import json
 import textwrap
+import shutil
 from pathlib import Path
 
 import pymupdf
+import pytesseract
+from PIL import Image, ImageOps
 
 
-SUPPORTED_EXTENSIONS = {".txt", ".md", ".json", ".csv", ".pdf"}
+# ---------------------------------------------------------
+# CONFIGURATION
+# ---------------------------------------------------------
+
+SUPPORTED_EXTENSIONS = {
+    ".txt",
+    ".md",
+    ".json",
+    ".csv",
+    ".pdf",
+    ".png",
+    ".jpg",
+    ".jpeg",
+}
+
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
+
+# Find Tesseract automatically.
+TESSERACT_PATH = shutil.which("tesseract")
+
+# Windows fallback location.
+if not TESSERACT_PATH:
+    default_path = Path(
+        r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+    )
+
+    if default_path.exists():
+        TESSERACT_PATH = str(default_path)
+
+if TESSERACT_PATH:
+    pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
 
 
 # ---------------------------------------------------------
@@ -21,8 +53,10 @@ def _validate_file(file_path: str | Path) -> Path:
     if not path.exists() or not path.is_file():
         raise FileNotFoundError(f"File not found: {path}")
 
-    if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
-        raise ValueError(f"Unsupported file type: {path.suffix}")
+    extension = path.suffix.lower()
+
+    if extension not in SUPPORTED_EXTENSIONS:
+        raise ValueError(f"Unsupported file type: {extension}")
 
     if path.stat().st_size > MAX_FILE_SIZE:
         raise ValueError("File exceeds the 10 MB size limit")
@@ -31,19 +65,66 @@ def _validate_file(file_path: str | Path) -> Path:
 
 
 # ---------------------------------------------------------
+# IMAGE OCR
+# ---------------------------------------------------------
+
+def _extract_image_text(path: Path) -> str:
+    """Extract text from PNG, JPG or JPEG using Tesseract OCR."""
+
+    if not TESSERACT_PATH:
+        raise RuntimeError(
+            "Tesseract OCR was not found. "
+            "Install Tesseract or configure its executable path."
+        )
+
+    try:
+        with Image.open(path) as image:
+            # Correct image orientation using EXIF metadata.
+            image = ImageOps.exif_transpose(image)
+
+            # Convert to a format suitable for OCR.
+            image = image.convert("RGB")
+
+            extracted_text = pytesseract.image_to_string(
+                image,
+                lang="eng",
+            )
+
+    except pytesseract.TesseractNotFoundError as error:
+        raise RuntimeError(
+            "Tesseract executable could not be started. "
+            "Check the Tesseract installation and PATH."
+        ) from error
+
+    except Exception as error:
+        raise ValueError(
+            f"Unable to read image or extract its text: {error}"
+        ) from error
+
+    return extracted_text
+
+
+# ---------------------------------------------------------
 # TEXT EXTRACTION
 # ---------------------------------------------------------
 
 def extract_text(file_path: str | Path) -> dict:
     """Extract text from supported document formats."""
+
     path = _validate_file(file_path)
     extension = path.suffix.lower()
 
+    # PDF
     if extension == ".pdf":
+
         text_parts = []
 
         with pymupdf.open(path) as document:
-            for page_number, page in enumerate(document, start=1):
+
+            for page_number, page in enumerate(
+                document,
+                start=1,
+            ):
                 page_text = page.get_text()
 
                 if page_text.strip():
@@ -53,11 +134,19 @@ def extract_text(file_path: str | Path) -> dict:
 
         extracted_text = "\n".join(text_parts)
 
+    # PNG, JPG, JPEG
+    elif extension in {".png", ".jpg", ".jpeg"}:
+
+        extracted_text = _extract_image_text(path)
+
+    # JSON
     elif extension == ".json":
+
         with path.open("r", encoding="utf-8-sig") as file:
             data = json.load(file)
 
         def collect_strings(value):
+
             if isinstance(value, str):
                 return [value]
 
@@ -79,20 +168,28 @@ def extract_text(file_path: str | Path) -> dict:
 
         extracted_text = "\n".join(collect_strings(data))
 
+    # CSV
     elif extension == ".csv":
+
         with path.open(
             "r",
             encoding="utf-8-sig",
             newline="",
         ) as file:
+
             rows = csv.reader(file)
 
             extracted_text = "\n".join(
-                " | ".join(row) for row in rows
+                " | ".join(row)
+                for row in rows
             )
 
+    # TXT AND MARKDOWN
     else:
-        extracted_text = path.read_text(encoding="utf-8-sig")
+
+        extracted_text = path.read_text(
+            encoding="utf-8-sig"
+        )
 
     return {
         "filename": path.name,
@@ -108,11 +205,12 @@ def extract_text(file_path: str | Path) -> dict:
 # ---------------------------------------------------------
 
 def _update_stats(result: dict, stats: dict) -> None:
-    """Accumulate detection statistics from a protection result."""
+    """Accumulate detection statistics."""
 
     stats["detected_count"] += result["detected_count"]
 
     for entity_type in result["detected_types"]:
+
         if entity_type not in stats["detected_types"]:
             stats["detected_types"].append(entity_type)
 
@@ -128,12 +226,7 @@ def _protect_name_with_context(
     engine,
     stats: dict,
 ) -> str:
-    """
-    Protect a name using temporary detection context.
-
-    The temporary prefix is removed from both the protected
-    output and the encrypted original value in the vault.
-    """
+    """Protect a name using temporary detection context."""
 
     if not value.strip():
         return value
@@ -144,12 +237,13 @@ def _protect_name_with_context(
 
     _update_stats(result, stats)
 
-    # Correct vault values if the detector tokenized the
-    # entire phrase, including the temporary prefix.
+    # Correct vault values if the entire phrase was tokenized.
     for token in result["token_map"]:
+
         original = engine.vault.restore(token)
 
         if original is not None and original.startswith(prefix):
+
             engine.vault.store(
                 original[len(prefix):],
                 token=token,
@@ -157,9 +251,6 @@ def _protect_name_with_context(
 
     protected_text = result["protected_text"]
 
-    # If the prefix remains visible, remove it.
-    # If the detector tokenized the entire phrase,
-    # preserve the complete token.
     if protected_text.startswith(prefix):
         protected_text = protected_text[len(prefix):]
 
@@ -170,8 +261,12 @@ def _protect_name_with_context(
 # NORMAL STRING PROTECTION
 # ---------------------------------------------------------
 
-def _protect_string(value: str, engine, stats: dict) -> str:
-    """Protect one string and accumulate detection metadata."""
+def _protect_string(
+    value: str,
+    engine,
+    stats: dict,
+) -> str:
+    """Protect a string and accumulate detection metadata."""
 
     if not isinstance(value, str):
         return value
@@ -187,11 +282,11 @@ def _protect_string(value: str, engine, stats: dict) -> str:
 
 
 # ---------------------------------------------------------
-# JSON PROTECTION
+# JSON FIELD NORMALIZATION
 # ---------------------------------------------------------
 
 def _normalize_field_name(field_name) -> str:
-    """Normalize JSON keys and CSV headers for comparison."""
+    """Normalize JSON keys and CSV headers."""
 
     if field_name is None:
         return ""
@@ -222,23 +317,38 @@ NAME_FIELDS = {
 }
 
 
-def _protect_json(value, engine, stats, field_name=None):
-    """Protect JSON strings recursively while preserving structure."""
+# ---------------------------------------------------------
+# JSON PROTECTION
+# ---------------------------------------------------------
+
+def _protect_json(
+    value,
+    engine,
+    stats,
+    field_name=None,
+):
+    """Protect JSON strings recursively."""
 
     if isinstance(value, str):
 
         normalized_field = _normalize_field_name(field_name)
 
         if normalized_field in NAME_FIELDS:
+
             return _protect_name_with_context(
                 value,
                 engine,
                 stats,
             )
 
-        return _protect_string(value, engine, stats)
+        return _protect_string(
+            value,
+            engine,
+            stats,
+        )
 
     if isinstance(value, dict):
+
         return {
             key: _protect_json(
                 item,
@@ -250,6 +360,7 @@ def _protect_json(value, engine, stats, field_name=None):
         }
 
     if isinstance(value, list):
+
         return [
             _protect_json(
                 item,
@@ -268,18 +379,20 @@ def _protect_json(value, engine, stats, field_name=None):
 # ---------------------------------------------------------
 
 def _restore_json(value, engine):
-    """Recursively restore JSON strings while preserving structure."""
+    """Restore JSON strings recursively."""
 
     if isinstance(value, str):
         return engine.restore(value)
 
     if isinstance(value, dict):
+
         return {
             key: _restore_json(item, engine)
             for key, item in value.items()
         }
 
     if isinstance(value, list):
+
         return [
             _restore_json(item, engine)
             for item in value
@@ -305,10 +418,12 @@ def _read_csv(path: Path):
         file.seek(0)
 
         try:
+
             dialect = csv.Sniffer().sniff(
                 sample,
                 delimiters=",;\t|",
             )
+
         except csv.Error:
             dialect = csv.excel
 
@@ -330,26 +445,28 @@ def _read_csv(path: Path):
 # CSV PROTECTION
 # ---------------------------------------------------------
 
-def _protect_csv(path: Path, engine, stats: dict) -> dict:
-    """
-    Protect CSV values while preserving the header,
-    row structure, column order, and CSV dialect.
-    """
+def _protect_csv(
+    path: Path,
+    engine,
+    stats: dict,
+) -> dict:
+    """Protect CSV values while preserving structure."""
 
     rows, dialect_info = _read_csv(path)
 
     if not rows:
+
         return {
             "rows": [],
             "dialect": dialect_info,
         }
 
-    # The first row is treated as the CSV header.
     headers = rows[0]
 
     protected_rows = [headers.copy()]
 
     for row in rows[1:]:
+
         protected_row = []
 
         for index, cell in enumerate(row):
@@ -369,6 +486,7 @@ def _protect_csv(path: Path, engine, stats: dict) -> dict:
                 )
 
             else:
+
                 protected_cell = _protect_string(
                     cell,
                     engine,
@@ -389,8 +507,11 @@ def _protect_csv(path: Path, engine, stats: dict) -> dict:
 # DOCUMENT PROTECTION
 # ---------------------------------------------------------
 
-def protect_document(file_path: str | Path, engine) -> dict:
-    """Protect supported documents while retaining their structure."""
+def protect_document(
+    file_path: str | Path,
+    engine,
+) -> dict:
+    """Protect supported documents using the local engine."""
 
     path = _validate_file(file_path)
     extension = path.suffix.lower()
@@ -404,7 +525,9 @@ def protect_document(file_path: str | Path, engine) -> dict:
     # TXT AND MARKDOWN
     if extension in {".txt", ".md"}:
 
-        original = path.read_text(encoding="utf-8-sig")
+        original = path.read_text(
+            encoding="utf-8-sig"
+        )
 
         protected = _protect_string(
             original,
@@ -415,7 +538,11 @@ def protect_document(file_path: str | Path, engine) -> dict:
     # JSON
     elif extension == ".json":
 
-        with path.open("r", encoding="utf-8-sig") as file:
+        with path.open(
+            "r",
+            encoding="utf-8-sig",
+        ) as file:
+
             original = json.load(file)
 
         protected = _protect_json(
@@ -436,11 +563,10 @@ def protect_document(file_path: str | Path, engine) -> dict:
     # PDF
     elif extension == ".pdf":
 
-        document = pymupdf.open(path)
+        pages = []
+        page_sizes = []
 
-        try:
-            pages = []
-            page_sizes = []
+        with pymupdf.open(path) as document:
 
             for page in document:
 
@@ -459,22 +585,56 @@ def protect_document(file_path: str | Path, engine) -> dict:
                     page.rect.height,
                 ])
 
-            protected = {
-                "pages": pages,
-                "page_sizes": page_sizes,
-            }
+        protected = {
+            "pages": pages,
+            "page_sizes": page_sizes,
+        }
 
-        finally:
-            document.close()
+    # IMAGE FILES
+    elif extension in {".png", ".jpg", ".jpeg"}:
+
+        extracted = extract_text(path)
+
+        if not extracted["text"].strip():
+
+            raise ValueError(
+                "No readable text found in the image. "
+                "Please check the image quality."
+            )
+
+        # OCR text is protected using the existing engine.
+        protected = _protect_string(
+            extracted["text"],
+            engine,
+            stats,
+        )
 
     else:
+
         raise ValueError(
             f"Unsupported file type: {extension}"
         )
 
+    is_image = extension in {
+        ".png",
+        ".jpg",
+        ".jpeg",
+    }
+
+    # Image OCR output is treated as a TXT document.
+    output_file_type = ".txt" if is_image else extension
+
+    output_filename = (
+        path.stem + ".txt"
+        if is_image
+        else path.name
+    )
+
     return {
-        "filename": path.name,
-        "file_type": extension,
+        "filename": output_filename,
+        "original_filename": path.name,
+        "file_type": output_file_type,
+        "source_file_type": extension,
         "protected_content": protected,
         "detected_count": stats["detected_count"],
         "detected_types": stats["detected_types"],
@@ -491,7 +651,7 @@ def restore_document(
     file_type: str,
     engine,
 ):
-    """Restore protected document content using the local token vault."""
+    """Restore protected content using the local token vault."""
 
     extension = file_type.lower()
 
@@ -507,6 +667,7 @@ def restore_document(
     if extension in {".txt", ".md"}:
 
         if not isinstance(protected_content, str):
+
             raise TypeError(
                 "Text document content must be a string"
             )
@@ -525,11 +686,13 @@ def restore_document(
     if extension == ".csv":
 
         if not isinstance(protected_content, dict):
+
             raise TypeError(
                 "Invalid CSV document content"
             )
 
         if "rows" not in protected_content:
+
             raise ValueError(
                 "CSV content is missing rows"
             )
@@ -549,6 +712,7 @@ def restore_document(
     if extension == ".pdf":
 
         if not isinstance(protected_content, dict):
+
             raise TypeError(
                 "Invalid PDF document content"
             )
@@ -575,7 +739,7 @@ def save_document(
     file_type: str,
     output_path: str | Path,
 ):
-    """Save restored content in its corresponding document format."""
+    """Save restored or protected content."""
 
     extension = file_type.lower()
 
@@ -590,6 +754,7 @@ def save_document(
     path = Path(output_path)
 
     if path.suffix.lower() != extension:
+
         raise ValueError(
             "Output filename extension does not match file type"
         )
@@ -602,6 +767,9 @@ def save_document(
     # TXT AND MARKDOWN
     if extension in {".txt", ".md"}:
 
+        if not isinstance(content, str):
+            raise TypeError("Text content must be a string")
+
         path.write_text(
             content,
             encoding="utf-8",
@@ -610,7 +778,11 @@ def save_document(
     # JSON
     elif extension == ".json":
 
-        with path.open("w", encoding="utf-8") as file:
+        with path.open(
+            "w",
+            encoding="utf-8",
+        ) as file:
+
             json.dump(
                 content,
                 file,
@@ -648,6 +820,7 @@ def save_document(
         page_sizes = content["page_sizes"]
 
         if len(pages) != len(page_sizes):
+
             raise ValueError(
                 "PDF page content and dimensions do not match"
             )
@@ -664,6 +837,7 @@ def save_document(
                 width, height = dimensions
 
                 if width <= 0 or height <= 0:
+
                     raise ValueError(
                         "Invalid PDF page dimensions"
                     )
