@@ -1,145 +1,72 @@
 
 (() => {
-    console.log("TriCypher: Protection script loaded.");
+    console.log("TriCypher: Protection bridge loaded.");
 
-    let isProtecting = false;
-    let allowNextSend = false;
+    const pendingRequests = new Set();
 
-    const SEND_SELECTOR = 'button[aria-label="Send"]';
-    const EDITOR_SELECTOR =
-        'div[role="textbox"][aria-label="Ask ChatGPT"]';
+    window.addEventListener("message", async (event) => {
+        if (event.source !== window) return;
+        if (event.origin !== window.location.origin) return;
 
-    function getPromptBox() {
-        return document.querySelector(EDITOR_SELECTOR);
-    }
+        const message = event.data;
 
-    function getPromptText(editor) {
-        return editor.innerText.trim();
-    }
+        const allowedTypes = [
+            "TRICYPHER_PROTECT_REQUEST",
+            "TRICYPHER_RESTORE_REQUEST"
+        ];
 
-    function setPromptText(editor, text) {
-    editor.focus();
+        if (
+            !message ||
+            !allowedTypes.includes(message.type) ||
+            typeof message.requestId !== "string" ||
+            typeof message.text !== "string"
+        ) {
+            return;
+        }
 
-    const selection = window.getSelection();
-    const range = document.createRange();
+        const { requestId, text, type } = message;
 
-    range.selectNodeContents(editor);
-    selection.removeAllRanges();
-    selection.addRange(range);
+        if (pendingRequests.has(requestId)) return;
+        pendingRequests.add(requestId);
 
-    const inserted = document.execCommand(
-        "insertText",
-        false,
-        text
-    );
-    console.log("TriCypher: Insert result:", inserted);
-console.log("TriCypher: Editor after insertion:", editor.innerText);
-console.log("TriCypher: Expected protected text:", text);
+        const isRestore = type === "TRICYPHER_RESTORE_REQUEST";
 
-    const normalize = (value) =>
-        value.replace(/\s+/g, " ").trim();
+        try {
+            const response = await chrome.runtime.sendMessage({
+                type: isRestore
+                    ? "TRICYPHER_RESTORE"
+                    : "TRICYPHER_PROTECT",
+                text
+            });
 
-    const actualText = normalize(editor.innerText);
-    const expectedText = normalize(text);
+            if (!response || !response.success) {
+                throw new Error("Local operation failed.");
+            }
 
-    if (!inserted || actualText !== expectedText) {
-        throw new Error("Could not safely replace the prompt.");
-    }
-}
+            window.postMessage({
+                type: isRestore
+                    ? "TRICYPHER_RESTORE_RESULT"
+                    : "TRICYPHER_PROTECT_RESULT",
+                requestId,
+                success: true,
+                protectedText: response.protectedText,
+                restoredText: response.restoredText
+            }, window.location.origin);
 
-    function protectWithBackground(originalText) {
-        return new Promise((resolve, reject) => {
-            chrome.runtime.sendMessage(
-                {
-                    type: "TRICYPHER_PROTECT",
-                    text: originalText
-                },
-                (response) => {
-                    if (chrome.runtime.lastError) {
-                        reject(
-                            new Error(chrome.runtime.lastError.message)
-                        );
-                        return;
-                    }
+        } catch (error) {
+            window.postMessage({
+                type: isRestore
+                    ? "TRICYPHER_RESTORE_RESULT"
+                    : "TRICYPHER_PROTECT_RESULT",
+                requestId,
+                success: false
+            }, window.location.origin);
 
-                    if (!response || !response.success) {
-                        reject(
-                            new Error(
-                                response?.error || "Protection failed."
-                            )
-                        );
-                        return;
-                    }
+            console.error("TriCypher: Local operation failed.");
+        } finally {
+            pendingRequests.delete(requestId);
+        }
+    });
 
-                    resolve(response);
-                }
-            );
-        });
-    }
-
-    
-document.addEventListener("click", async (event) => {
-    if (!(event.target instanceof Element)) return;
-
-    const sendButton = event.target.closest(SEND_SELECTOR);
-    if (!sendButton) return;
-
-    // Ignore our own synthetic click.
-    if (allowNextSend && event.isTrusted === false) {
-        allowNextSend = false;
-        return;
-    }
-
-    if (isProtecting) {
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        return;
-    }
-
-    const editor = getPromptBox();
-    if (!editor) return;
-
-    const originalText = getPromptText(editor);
-    if (!originalText) return;
-
-    // Cancel the original user submission.
-    event.preventDefault();
-    event.stopImmediatePropagation();
-
-    isProtecting = true;
-    sendButton.disabled = true;
-
-    console.log("TriCypher: Intercepted original submission.");
-
-    try {
-        const result = await protectWithBackground(originalText);
-
-        console.log("TriCypher: Detected entities:", result.detectedCount);
-
-        setPromptText(editor, result.protectedText);
-
-        console.log("TriCypher: Protected prompt inserted.");
-
-        // Re-enable the button before triggering submission.
-        sendButton.disabled = false;
-
-        // Allow one synthetic click to submit the protected prompt.
-        allowNextSend = true;
-        sendButton.click();
-
-    } catch (error) {
-        console.error("TriCypher protection error:", error);
-
-        alert(
-            "TriCypher could not protect this prompt. " +
-            "Your original prompt was not sent."
-        );
-
-        sendButton.disabled = false;
-
-    } finally {
-        isProtecting = false;
-    }
-}, true);
-    console.log("TriCypher: Send interception is ready.");
+    console.log("TriCypher: Protection and restoration bridge ready.");
 })();

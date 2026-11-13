@@ -4,6 +4,7 @@ from .anonymizer import TriCypherAnonymizer
 from .vault import TokenVault
 from dotenv import load_dotenv
 import re
+import secrets
 
 load_dotenv()
 
@@ -22,6 +23,8 @@ class TriCypher:
             raise ValueError("Input text cannot be empty")
 
         detected_entities = self.detector.detect(text)
+
+      
         # Remove overlapping detections.
         # Prefer the longer detected entity.
         filtered_entities = []
@@ -41,7 +44,7 @@ class TriCypher:
 
         detected_entities = filtered_entities
 
-        # Replace each detected entity with a unique reversible token.
+        # Replace sensitive values with typed reversible tokens.
         protected_text = text
         token_map = {}
 
@@ -51,7 +54,11 @@ class TriCypher:
             reverse=True,
         ):
             original_value = text[entity.start:entity.end]
-            token = self.vault.store(original_value)
+
+            entity_type = entity.entity_type
+            token = f"<TC_{entity_type}_{secrets.token_hex(6)}>"
+
+            self.vault.store(original_value, token=token)
 
             protected_text = (
                 protected_text[:entity.start]
@@ -59,7 +66,7 @@ class TriCypher:
                 + protected_text[entity.end:]
             )
 
-            token_map[token] = entity.entity_type
+            token_map[token] = entity_type
 
         return {
             "protected_text": protected_text,
@@ -71,7 +78,7 @@ class TriCypher:
         }
 
     def restore(self, protected_text: str) -> str:
-        pattern = r"<TC_[a-f0-9]{12}>"
+        pattern = r"<TC_[A-Z0-9_]+_[a-f0-9]{12}>"
 
         def replace_token(match):
             token = match.group(0)

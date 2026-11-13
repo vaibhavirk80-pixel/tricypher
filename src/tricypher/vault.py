@@ -1,7 +1,6 @@
 
 import os
 import time
-import uuid
 from cryptography.fernet import Fernet, InvalidToken
 
 
@@ -20,8 +19,11 @@ class TokenVault:
         self.ttl_seconds = ttl_seconds
         self.storage = {}
 
-    def store(self, original_value):
-        token = f"<TC_{uuid.uuid4().hex[:12]}>"
+    def store(self, original_value, token=None):
+        # Generate a token if one was not supplied.
+        if token is None:
+            import secrets
+            token = f"<TC_{secrets.token_hex(6)}>"
 
         encrypted_value = self.cipher.encrypt(
             original_value.encode()
